@@ -1,0 +1,116 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: carscout
+      POSTGRES_PASSWORD: carscout
+      POSTGRES_DB: carscout
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carscout -d carscout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+    logging: *default-logging
+
+  fixture:
+    build: .
+    image: carscout:latest
+    command: ["carscout", "fixture", "--host", "0.0.0.0", "--port", "8088"]
+    ports:
+      - "8088:8088"
+    environment:
+      DATA_DIR: /data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8088/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+
+  api:
+    build: .
+    image: carscout:latest
+    command: ["carscout", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment: &app-env
+      CARSCOUT_DATABASE_URL: postgresql://carscout:carscout@postgres:5432/carscout
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      FIXTURE_BASE_URL: http://fixture:8088
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      - archive:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+
+  scheduler:
+    build: .
+    image: carscout:latest
+    command: ["carscout", "scheduler"]
+    environment:
+      <<: *app-env
+    volumes:
+      - archive:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+
+  # one-off full crawl:  docker compose run --rm crawl
+  crawl:
+    build: .
+    image: carscout:latest
+    profiles: ["tools"]
+    entrypoint: ["carscout"]
+    command: ["run"]
+    environment:
+      <<: *app-env
+    volumes:
+      - archive:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fixture:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  archive:
